@@ -11,7 +11,7 @@ static struct rio_pkt in_pkt, out_pkt;
 
 int test_rio()
 {
-    int rc;
+    int rc = 1;
 
     nvic_int_enable(TRCH_IRQ__RIO_1);
 
@@ -23,7 +23,7 @@ int test_rio()
     out_pkt.dest_id = RIO_DEVID_EP1,
 
     out_pkt.ftype = RIO_FTYPE_MAINT,
-    out_pkt.src_tid = 0x1;
+    out_pkt.target_tid = 0x3; /* TODO: to deliver to SW via SP RX, must not be 0x0,0x1,0x2 */
     out_pkt.transaction = RIO_TRANS_MAINT_REQ_READ,
     out_pkt.size = 4,
     /* TODO: compose an actual CAP/CSR read, for now assuming echo */
@@ -49,11 +49,13 @@ int test_rio()
      * instead of blocking on receive and checking the first pkt */
     /* TODO: more checks */
     if (!(in_pkt.ftype == RIO_FTYPE_MAINT &&
-          in_pkt.src_tid == out_pkt.src_tid &&
+          in_pkt.target_tid == out_pkt.target_tid &&
           in_pkt.payload_len == 1 && in_pkt.payload[0] == 0xdeadbeef)) {
         printf("RIO TEST: ERROR: bad response to MAINTENANCE request\r\n");
         goto fail_resp;
     }
+
+	rc = 0;
 
 fail_resp:
     rio_ep_destroy(ep1);

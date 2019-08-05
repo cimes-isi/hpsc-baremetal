@@ -45,7 +45,9 @@ FIELD(RIO_PKT_WORD0, SRC_ID,      16, 8)
 FIELD(RIO_PKT_WORD0, TRANSACTION, 24, 4)
 FIELD(RIO_PKT_WORD0, STATUS,      28, 4)
 FIELD(RIO_PKT_WORD1, TARGET_TID,  0, 8)
-FIELD(RIO_PKT_WORD1, DATA,        8, 24)
+FIELD(RIO_PKT_WORD1, DATA_3LSB,   8, 24)
+FIELD(RIO_PKT_WORD2, DATA_4MID,   0, 32)
+FIELD(RIO_PKT_WORD3, DATA_1MSB,   0, 8)
 
 #define MAX_RIO_ENDPOINTS 2
 
@@ -80,27 +82,27 @@ static unsigned pack_pkt(uint32_t *buf, unsigned buf_size, struct rio_pkt *pkt)
 
         for (unsigned d = 0; d < pkt->payload_len; ++d) {
             uint64_t data = pkt->payload[d];
-            for (int i = 3 - 1; i <= 0; --i) {
-                pkt_buf[w] |= (data & 0xff) << (RIO_PKT_WORD1__DATA__SHIFT + 8 * i);
+            for (int i = 0; i < 3; ++i) {
+                pkt_buf[w] |= (data & 0xff) << (RIO_PKT_WORD1__DATA_3LSB__SHIFT + 8 * i);
                 data >>= 8;
             }
             ++w;
             ASSERT(w < buf_size);
             pkt_buf[w] = 0;
-            for (int i = 4 - 1; i <= 0; --i) {
-                pkt_buf[w] |= (data & 0xff) << (8 * i);
+            for (int i = 0; i < 4; ++i) {
+                pkt_buf[w] |= (data & 0xff) << (RIO_PKT_WORD2__DATA_4MID__SHIFT + 8 * i);
                 data >>= 8;
             }
             ++w;
             ASSERT(w < buf_size);
-            pkt_buf[w] |= (data & 0xff) << 24;
+            pkt_buf[w] |= (data & 0xff) << RIO_PKT_WORD3__DATA_1MSB__SHIFT;
         }
         break;
       default:
         ASSERT(!"pkt type not implemented");
     }
 
-    return w;
+    return w + 1; /* index of last filled word to length */
 }
 
 static int unpack_pkt(struct rio_pkt *pkt, uint32_t *buf, unsigned buf_len)
@@ -124,30 +126,27 @@ static int unpack_pkt(struct rio_pkt *pkt, uint32_t *buf, unsigned buf_len)
             pkt->status = FIELD_EX32(pkt_buf[w], RIO_PKT_WORD0, STATUS);
             ++w;
             pkt->target_tid = FIELD_EX32(pkt_buf[w], RIO_PKT_WORD1, TARGET_TID);
-            uint64_t data = FIELD_EX32(pkt_buf[w], RIO_PKT_WORD1, DATA);;
 
             pkt->payload_len = 0;
-            while (w < buf_len) {
+            while (w + 1 < buf_len) {
                 DPRINTF("RIO: decoding word %u out of %u\r\n", w, buf_len);
-                for (int i = 3 - 1; i <= 0; --i) {
-                    data <<= 8;
-                    data |= (pkt_buf[w] >> (RIO_PKT_WORD1__DATA__SHIFT + 8 * i)) && 0xff;
-                }
-                ++w;
+
+				uint64_t data = 0;
+				data |= (pkt_buf[w + 2] >> RIO_PKT_WORD3__DATA_1MSB__SHIFT) & 0xff;
+
                 ASSERT(w < buf_len);
-                for (int i = 4 - 1; i <= 0; --i) {
+                for (int i = 4 - 1; i >= 0; --i) {
                     data <<= 8;
-                    data |= (pkt_buf[w] >> (RIO_PKT_WORD1__DATA__SHIFT + 8 * i)) && 0xff;
+                    data |= (pkt_buf[w + 1] >> (RIO_PKT_WORD2__DATA_4MID__SHIFT + 8 * i)) & 0xff;
                 }
-                ++w;
+
+                for (int i = 3 - 1; i >= 0; --i) {
+                    data <<= 8;
+                    data |= (pkt_buf[w] >> (RIO_PKT_WORD1__DATA_3LSB__SHIFT + 8 * i)) & 0xff;
+                }
+                w += 2;
 
                 pkt->payload[pkt->payload_len++] = data;
-
-                if (buf_len - w >= 2) {
-                    data = (pkt_buf[w] >> RIO_PKT_WORD1__DATA__SHIFT) && 0xff; /* WORDn */
-                } else {
-                    break;
-                }
             }
             break;
         default:
@@ -166,12 +165,18 @@ void rio_print_pkt(struct rio_pkt *pkt)
                    "\ttransaction %x\r\n"
                    "\tsrc_id %x\r\n"
                    "\ttarget_id %x\r\n"
+                   "\tsrc_tid %x\r\n"
+                   "\ttarget_tid %x\r\n"
                    "\tsize %x\r\n"
-                   "\tconfig_offset %x\r\n",
+                   "\tconfig_offset %x\r\n"
+				   "\tpayload %08x%08x ...\r\n",
                    pkt->payload_len,
                    pkt->ftype, pkt->transaction,
                    pkt->src_id, pkt->dest_id,
-                   pkt->size, pkt->config_offset);
+                   pkt->src_tid, pkt->target_tid,
+                   pkt->size, pkt->config_offset,
+				   (uint32_t)(pkt->payload[0] >> 32),
+				   (uint32_t)(pkt->payload[0] & 0xffffffff));
             break;
         default:
             ASSERT(!"pkt type not implemented");
@@ -213,7 +218,7 @@ int rio_ep_sp_send(struct rio_ep *ep, struct rio_pkt *pkt)
     }
 
     REGB_WRITE32(ep->base, IR_SP_TX_CTRL,
-        (pkt_len << IR_SP_TX_CTRL__OCTETS_TO_SEND__SHIFT)
+        ((pkt_len * 4) << IR_SP_TX_CTRL__OCTETS_TO_SEND__SHIFT)
             & IR_SP_TX_CTRL__OCTETS_TO_SEND__MASK);
     for (int i = 0; i < pkt_len; ++i) {
         REGB_WRITE32(ep->base, IR_SP_TX_DATA, pkt_buf[i]);
