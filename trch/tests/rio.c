@@ -24,13 +24,7 @@ static int test_send_receive(struct rio_ep *ep0, struct rio_ep *ep1)
     out_pkt.target_tid = 0x3; /* TODO: to deliver to SW via SP RX, must not be 0x0,0x1,0x2 */
     out_pkt.transaction = RIO_TRANS_MAINT_RESP_READ; /* TODO: see above */
 
-#if 0
-	/* 32-bit read (see Table 4-3 in Spec) */
-    out_pkt.rdwrsize = 0b1000;
-    out_pkt.wdptr = 0b1;
-#else
 	out_pkt.status = 0x1;
-#endif
 
     /* TODO: compose an actual CAP/CSR read, for now assuming echo */
     out_pkt.config_offset = 0x0;
