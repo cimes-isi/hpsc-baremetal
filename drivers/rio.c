@@ -1,5 +1,8 @@
 #define DEBUG 1
 
+#include <stdbool.h>
+#include <stdint.h>
+
 #include "rio.h"
 
 #include "object.h"
@@ -54,6 +57,11 @@ FIELD(RIO_PKT_WORD1, CONFIG_OFFSET, 8, 21)
 FIELD(RIO_PKT_WORD1, WDPTR,         29, 1)
 FIELD(RIO_PKT_WORD2, DATA_4MID,     0, 32)
 FIELD(RIO_PKT_WORD3, DATA_1MSB,     0, 8)
+
+enum access_type {
+    ACCESS_READ,
+    ACCESS_WRITE,
+};
 
 #define MAX_RIO_ENDPOINTS 2
 
@@ -130,54 +138,17 @@ static uint16_t find_rdwr_size_entry(uint16_t bytes, uint64_t mask)
     return i;
 }
 
-
-#if 0
-static unsigned pack_pkt(uint32_t *buf, unsigned buf_size, struct rio_pkt *pkt)
+static bool check_rdwr_size(uint16_t bytes, uint64_t mask)
 {
-    unsigned w = 0;
-
-    switch (pkt->ftype) {
-      case RIO_FTYPE_MAINT:
-
-        ASSERT(w < buf_size);
-        buf[w] = FIELD_DP32(buf[w], RIO_PKT_WORD0, PRIO, pkt->prio);
-        buf[w] = FIELD_DP32(buf[w], RIO_PKT_WORD0, TTYPE, pkt->ttype);
-        buf[w] = FIELD_DP32(buf[w], RIO_PKT_WORD0, FTYPE, pkt->ftype);
-        buf[w] = FIELD_DP32(buf[w], RIO_PKT_WORD0, DEST_ID, pkt->dest_id);
-        buf[w] = FIELD_DP32(buf[w], RIO_PKT_WORD0, SRC_ID, pkt->src_id);
-        buf[w] = FIELD_DP32(buf[w], RIO_PKT_WORD0, TRANSACTION, pkt->transaction);
-        buf[w] = FIELD_DP32(buf[w], RIO_PKT_WORD0, STATUS, pkt->status);
-        ++w;
-        ASSERT(w < buf_size);
-
-
-        buf[w] = FIELD_DP32(buf[w], RIO_PKT_WORD1, TARGET_TID, pkt->target_tid);
-
-        for (unsigned d = 0; d < pkt->payload_len; ++d) {
-            uint64_t data = pkt->payload[d];
-            for (int i = 0; i < 3; ++i) {
-                buf[w] |= (data & 0xff) << (RIO_PKT_WORD1__DATA_3LSB__SHIFT + 8 * i);
-                data >>= 8;
-            }
-            ++w;
-            ASSERT(w < buf_size);
-            buf[w] = 0;
-            for (int i = 0; i < 4; ++i) {
-                buf[w] |= (data & 0xff) << (RIO_PKT_WORD2__DATA_4MID__SHIFT + 8 * i);
-                data >>= 8;
-            }
-            ++w;
-            ASSERT(w < buf_size);
-            buf[w] |= (data & 0xff) << RIO_PKT_WORD3__DATA_1MSB__SHIFT;
-        }
-        break;
-      default:
-        ASSERT(!"pkt type not implemented");
+    uint16_t entry_index = find_rdwr_size_entry(bytes, mask);
+    if (entry_index >= RDWR_SIZE_TABLE_ENTRIES) {
+        printf("RIO EP: rd/wr size bytes/mask not supported: %u/%08x%08x\r\n",
+               bytes, (uint32_t)(mask >> 32), (uint32_t)(mask & 0xffffffff));
+        return false;
     }
-
-    return w + 1; /* index of last filled word to length */
+    return true;
 }
-#else
+
 static unsigned pack_pkt(uint32_t *buf, unsigned buf_size, struct rio_pkt *pkt)
 {
     unsigned w = 0;
@@ -247,73 +218,7 @@ static unsigned pack_pkt(uint32_t *buf, unsigned buf_size, struct rio_pkt *pkt)
 
     return w;
 }
-#endif
 
-#if 0
-static int unpack_pkt(struct rio_pkt *pkt, uint32_t *buf, unsigned buf_len)
-{
-    unsigned w = 0;
-
-    ASSERT(buf_len > 1); /* Fixed-length fields make up at least one word */
-
-    /* Transport layer */
-    pkt->prio = FIELD_EX32(buf[w], RIO_PKT_WORD0, PRIO);
-    pkt->ttype = FIELD_EX32(buf[w], RIO_PKT_WORD0, TTYPE);
-
-    /* Logical layer */
-    pkt->ftype = FIELD_EX32(buf[w], RIO_PKT_WORD0, FTYPE);
-
-    switch (pkt->ftype) {
-        case RIO_FTYPE_MAINT:
-            pkt->dest_id = FIELD_EX32(buf[w], RIO_PKT_WORD0, DEST_ID);
-            pkt->src_id = FIELD_EX32(buf[w], RIO_PKT_WORD0, SRC_ID);
-            pkt->transaction = FIELD_EX32(buf[w], RIO_PKT_WORD0, TRANSACTION);
-
-			switch (pkt->transaction) {
-				case RIO_TRANS_MAINT_REQ_READ:
-				case RIO_TRANS_MAINT_REQ_WRITE:
-            		pkt->rdwrsize = FIELD_EX32(buf[w], RIO_PKT_WORD0, RDWRSIZE);
-					break;
-				case RIO_TRANS_MAINT_RESP_READ:
-				case RIO_TRANS_MAINT_RESP_WRITE:
-            		pkt->status = FIELD_EX32(buf[w], RIO_PKT_WORD0, STATUS);
-					break;
-				default:
-            		ASSERT(!"pkt transaction not implemented");
-			}
-
-            ++w;
-            pkt->target_tid = FIELD_EX32(buf[w], RIO_PKT_WORD1, TARGET_TID);
-
-            pkt->payload_len = 0;
-            while (w + 1 < buf_len) {
-                DPRINTF("RIO: decoding word %u out of %u\r\n", w, buf_len);
-
-				uint64_t data = 0;
-				data |= (buf[w + 2] >> RIO_PKT_WORD3__DATA_1MSB__SHIFT) & 0xff;
-
-                ASSERT(w < buf_len);
-                for (int i = 4 - 1; i >= 0; --i) {
-                    data <<= 8;
-                    data |= (buf[w + 1] >> (RIO_PKT_WORD2__DATA_4MID__SHIFT + 8 * i)) & 0xff;
-                }
-
-                for (int i = 3 - 1; i >= 0; --i) {
-                    data <<= 8;
-                    data |= (buf[w] >> (RIO_PKT_WORD1__DATA_3LSB__SHIFT + 8 * i)) & 0xff;
-                }
-                w += 2;
-
-                pkt->payload[pkt->payload_len++] = data;
-            }
-            break;
-        default:
-            ASSERT(!"pkt type not implemented");
-    }
-
-    return 0;
-}
-#else
 static int unpack_pkt(struct rio_pkt *pkt, uint32_t *buf, unsigned buf_len)
 {
     unsigned w = 0;
@@ -355,7 +260,7 @@ static int unpack_pkt(struct rio_pkt *pkt, uint32_t *buf, unsigned buf_len)
 
                     /* TODO: For wrsize = 4, do we return payload of one word or one double-word? */
                     if (pkt->transaction == RIO_TRANS_MAINT_REQ_WRITE) {
-                        for (int i = 0; i < buf_len; i += 2) {
+                        for (int i = 0; i < buf_len - w; i += 2) {
                             ASSERT(w < buf_len);
                             pkt->payload[i] = buf[w];
                             ++w;
@@ -404,7 +309,6 @@ static int unpack_pkt(struct rio_pkt *pkt, uint32_t *buf, unsigned buf_len)
 
     return 0;
 }
-#endif
 
 void rio_print_pkt(struct rio_pkt *pkt)
 {
@@ -491,6 +395,8 @@ int rio_ep_sp_send(struct rio_ep *ep, struct rio_pkt *pkt)
 
 int rio_ep_sp_recv(struct rio_ep *ep, struct rio_pkt *pkt)
 {
+    bzero(pkt_buf, sizeof(pkt_buf));
+
     DPRINTF("RIO EP %s: waiting for packet in RX FIFO...\r\n", ep->name);
     while ((REGB_READ32(ep->base, IR_SP_RX_STAT) & IR_SP_TX_STAT__BUFFERS_FILLED__MASK) == 0);
 
@@ -516,10 +422,13 @@ int rio_ep_sp_recv(struct rio_ep *ep, struct rio_pkt *pkt)
     return unpack_pkt(pkt, pkt_buf, pkt_len);
 }
 
-int rio_ep_read_csr(struct rio_ep *ep, uint64_t *data, rio_devid_t dest,
-                    uint32_t offset, uint16_t len, uint64_t mask)
+static int rio_ep_access_csr(struct rio_ep *ep, uint64_t *data, rio_devid_t dest,
+                      uint32_t offset, uint16_t len, uint64_t mask,
+                      enum access_type access)
 {
     int rc;
+    enum rio_transaction resp_transaction;
+    unsigned resp_payload_len;
 
     out_pkt.ttype = RIO_TRANSPORT_DEV8;
     out_pkt.src_id = ep->devid;
@@ -527,20 +436,30 @@ int rio_ep_read_csr(struct rio_ep *ep, uint64_t *data, rio_devid_t dest,
 
     out_pkt.ftype = RIO_FTYPE_MAINT;
     out_pkt.src_tid = 0x3; /* TODO: to be delivered to maint unit, must be 0x0,0x1,0x2 */
-    out_pkt.transaction = RIO_TRANS_MAINT_REQ_READ;
 
-    uint16_t entry_index = find_rdwr_size_entry(len, mask);
-    if (entry_index >= RDWR_SIZE_TABLE_ENTRIES) {
-        printf("RIO EP %s: rd/wr size bytes/mask not supported: %u/%08x%08x\r\n",
-               ep->name, len,
-               (uint32_t)(mask >> 32), (uint32_t)(mask & 0xffffffff));
+    if (!check_rdwr_size(len, mask))
         return 1;
-    }
     out_pkt.rdwr_bytes = len;
     out_pkt.rdwr_mask = mask;
 
     out_pkt.config_offset = offset;
-    out_pkt.payload_len = 0x0;
+
+    switch (access) {
+        case ACCESS_READ:
+            out_pkt.transaction = RIO_TRANS_MAINT_REQ_READ;
+            resp_transaction = RIO_TRANS_MAINT_RESP_READ;
+            resp_payload_len = DIV_CEIL(len, 8);
+            break;
+        case ACCESS_WRITE:
+            out_pkt.transaction = RIO_TRANS_MAINT_REQ_WRITE;
+            resp_transaction = RIO_TRANS_MAINT_RESP_WRITE;
+            resp_payload_len = 0;
+            out_pkt.payload_len = DIV_CEIL(len, 8);
+            for (int i = 0; i < out_pkt.payload_len; ++i) {
+                out_pkt.payload[i] = data[i];
+            }
+            break;
+    }
 
     printf("RIO EP %s: sending maint req:\r\n", ep->name);
     rio_print_pkt(&out_pkt);
@@ -557,9 +476,9 @@ int rio_ep_read_csr(struct rio_ep *ep, uint64_t *data, rio_devid_t dest,
     rio_print_pkt(&in_pkt);
 
     if (!(in_pkt.ftype == RIO_FTYPE_MAINT &&
-          in_pkt.transaction == RIO_TRANS_MAINT_RESP_READ &&
+          in_pkt.transaction == resp_transaction &&
           in_pkt.target_tid == out_pkt.src_tid &&
-          in_pkt.payload_len == DIV_CEIL(len, 8))) {
+          in_pkt.payload_len == resp_payload_len)) {
         printf("RIO EP %s: ERROR: bad response to MAINTENANCE request\r\n", ep->name);
 		return 1;
     }
@@ -570,10 +489,25 @@ int rio_ep_read_csr(struct rio_ep *ep, uint64_t *data, rio_devid_t dest,
         return 1;
     }
 
-    for (int i = 0; i < DIV_CEIL(len, 8); ++i) {
-        data[i] = in_pkt.payload[i];
+    if (access == ACCESS_READ) {
+        for (int i = 0; i < resp_payload_len; ++i) {
+            data[i] = in_pkt.payload[i];
+        }
     }
 	return 0;
+}
+
+int rio_ep_read_csr(struct rio_ep *ep, uint64_t *data, rio_devid_t dest,
+                    uint32_t offset, uint16_t len, uint64_t mask)
+{
+    return rio_ep_access_csr(ep, data, dest, offset, len, mask, ACCESS_READ);
+}
+
+int rio_ep_write_csr(struct rio_ep *ep, const uint64_t *data, rio_devid_t dest,
+                     uint32_t offset, uint16_t len, uint64_t mask)
+{
+    return rio_ep_access_csr(ep, (uint64_t *)data, dest,
+                             offset, len, mask, ACCESS_WRITE);
 }
 
 int rio_ep_read_csr_32(struct rio_ep *ep, uint32_t *data, rio_devid_t dest,
@@ -584,5 +518,15 @@ int rio_ep_read_csr_32(struct rio_ep *ep, uint32_t *data, rio_devid_t dest,
     if (rc)
         return rc;
     *data = (uint32_t)(data_dw & 0xffffffff);
+    return 0;
+}
+
+int rio_ep_write_csr_32(struct rio_ep *ep, const uint32_t *data,
+                        rio_devid_t dest, uint32_t offset)
+{
+    uint64_t data_dw = *data;
+    int rc = rio_ep_write_csr(ep, &data_dw, dest, offset, 4, 0xffffffff);
+    if (rc)
+        return rc;
     return 0;
 }

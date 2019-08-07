@@ -94,6 +94,30 @@ static int test_read_csr(struct rio_ep *ep0, struct rio_ep *ep1)
 	return 0;
 }
 
+static int test_write_csr(struct rio_ep *ep0, struct rio_ep *ep1)
+{
+	uint32_t device_id = 0x0000aa00, read_device_id = 0x0;
+	int rc;
+
+	printf("RIO TEST: running write CSR test...\r\n");
+
+	rc = rio_ep_write_csr_32(ep0, &device_id, RIO_DEVID_EP1, B_DEV_ID);
+	if (rc)
+		return rc;
+
+	rc = rio_ep_read_csr_32(ep0, &read_device_id, RIO_DEVID_EP1, B_DEV_ID);
+	if (rc)
+		return rc;
+	if (read_device_id != device_id) {
+		printf("RIO TEST EP %s: read value differs from written: "
+               "B_DEV_ID = %x (written %x)\r\n",
+			   ep1->name, read_device_id, device_id);
+		return 2;
+	}
+
+	return 0;
+}
+
 int test_rio()
 {
     int rc = 1;
@@ -116,6 +140,12 @@ int test_rio()
 	rc = test_read_csr(ep0, ep1);
 	if (rc) {
 		printf("RIO TEST: FAILED: read_csr test failed\r\n");
+		goto fail;
+	}
+
+	rc = test_write_csr(ep0, ep1);
+	if (rc) {
+		printf("RIO TEST: FAILED: write_csr test failed\r\n");
 		goto fail;
 	}
 

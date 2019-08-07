@@ -12,6 +12,10 @@ REG32(DEV_ID,      0x000000)
     FIELD(DEV_ID, DEVICE_IDENTITY,               0, 16)
     FIELD(DEV_ID, DEVICE_VENDOR_IDENTITY,       16, 16)
 
+REG32(B_DEV_ID,      0x000060)
+    FIELD(B_DEV_ID, BASE_DEVICE_ID,              8, 16)
+    FIELD(B_DEV_ID, LARGE_BASE_DEVICE_ID,       16, 16)
+
 /* Max supported by Praesum BRC1 EP are 16-bit IDs */
 typedef uint16_t rio_devid_t;
 
@@ -85,7 +89,11 @@ int rio_ep_sp_send(struct rio_ep *ep, struct rio_pkt *pkt);
 int rio_ep_sp_recv(struct rio_ep *ep, struct rio_pkt *pkt);
 int rio_ep_read_csr(struct rio_ep *ep, uint64_t *data, rio_devid_t dest,
                     uint32_t offset, uint16_t len, uint64_t mask);
-int rio_ep_read_csr_32(struct rio_ep *ep, uint32_t *data, rio_devid_t dest,
-                       uint32_t offset);
+int rio_ep_write_csr(struct rio_ep *ep, const uint64_t *data,rio_devid_t dest,
+                    uint32_t offset, uint16_t len, uint64_t mask);
+int rio_ep_read_csr_32(struct rio_ep *ep, uint32_t *data,
+                       rio_devid_t dest, uint32_t offset);
+int rio_ep_write_csr_32(struct rio_ep *ep, const uint32_t *data,
+                        rio_devid_t dest, uint32_t offset);
 
 #endif // RIO_H
