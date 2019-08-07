@@ -3,11 +3,22 @@
 
 #include <stdint.h>
 
+#include "regops.h"
+
 #define RIO_MAX_PAYLOAD_SIZE 256 /* TODO: check */
+
+/* Common CSRs */
+REG32(DEV_ID,      0x000000)
+    FIELD(DEV_ID, DEVICE_IDENTITY,               0, 16)
+    FIELD(DEV_ID, DEVICE_VENDOR_IDENTITY,       16, 16)
+
+/* Max supported by Praesum BRC1 EP are 16-bit IDs */
+typedef uint16_t rio_devid_t;
 
 struct rio_ep {
     const char *name;
     volatile uint32_t *base;
+    rio_devid_t devid;
 };
 
 enum rio_transport_type {
@@ -16,7 +27,7 @@ enum rio_transport_type {
     RIO_TRANSPORT_DEV32, /* not supported by Praesum BRC1 EP */
 };
 
-/* Talbe 4-1 in RIO Spec P1 */
+/* Tabel 4-1 in RIO Spec P1 */
 enum rio_ftype {
     RIO_FTYPE_REQ           =  2,
     RIO_FTYPE_WRITE         =  5,
@@ -33,8 +44,11 @@ enum rio_transaction {
     RIO_TRANS_MAINT_REQ_PORT_WRITE  = 0b0100,
 };
 
-/* Max supported by Praesum BRC1 EP are 16-bit IDs */
-typedef uint16_t rio_devid_t;
+/* Table 4-7 in Spec */
+enum rio_status {
+    RIO_STATUS_DONE     = 0x0000,
+    RIO_STATUS_ERROR    = 0b0111,
+};
 
 /* Struct sufficiently general to hold a packet of any type */
 /* TODO: consider splitting into physical, logical, and transport? */
@@ -52,7 +66,9 @@ struct rio_pkt {
     uint8_t src_tid;
     uint8_t target_tid;
     enum rio_transaction transaction;
-    uint8_t size;
+    uint16_t rdwr_bytes;
+    uint64_t rdwr_mask;
+    uint8_t wdptr;
     uint8_t status;
     uint32_t config_offset;
     unsigned payload_len;
@@ -63,9 +79,13 @@ struct rio_pkt {
 
 void rio_print_pkt(struct rio_pkt *pkt);
 
-struct rio_ep *rio_ep_create(const char *name, volatile uint32_t *base);
+struct rio_ep *rio_ep_create(const char *name, volatile uint32_t *base, rio_devid_t devid);
 int rio_ep_destroy(struct rio_ep *ep);
 int rio_ep_sp_send(struct rio_ep *ep, struct rio_pkt *pkt);
 int rio_ep_sp_recv(struct rio_ep *ep, struct rio_pkt *pkt);
+int rio_ep_read_csr(struct rio_ep *ep, uint64_t *data, rio_devid_t dest,
+                    uint32_t offset, uint16_t len, uint64_t mask);
+int rio_ep_read_csr_32(struct rio_ep *ep, uint32_t *data, rio_devid_t dest,
+                       uint32_t offset);
 
 #endif // RIO_H
