@@ -15,6 +15,14 @@ void bzero(void *p, size_t sz)
         *bp++ = 0;
 }
 
+void *memset(void *s, int c, size_t n)
+{
+    uint8_t *ptr = s;
+    for (int i = 0; i < n; ++i)
+        ptr[i] = (uint8_t)c;
+    return s;
+}
+
 volatile void *vmem_set(volatile void *s, int c, unsigned n)
 {
     volatile uint8_t *bs = s;
