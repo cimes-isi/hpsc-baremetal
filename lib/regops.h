@@ -39,7 +39,7 @@
         unsigned int v: reg ## __ ## field ## __LENGTH;                    \
     } v = { .v = val };                                                   \
     uint64_t d;                                                           \
-    d = deposit64((storage), reg ## _ ## field ## __SHIFT,                \
+    d = deposit64((storage), reg ## __ ## field ## __SHIFT,                \
                   reg ## __ ## field ## __LENGTH, v.v);                    \
     d; })
 
