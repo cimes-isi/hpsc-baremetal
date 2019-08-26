@@ -11,7 +11,7 @@ void bzero(void *p, int sz)
         sz -= sizeof(uint32_t);
     }
     uint8_t *bp = (uint8_t *)wp;
-    while (sz-- >= 0)
+    while (sz-- > 0)
         *bp++ = 0;
 }
 
