@@ -2,7 +2,7 @@
 
 #include "mem.h"
 
-void bzero(void *p, int sz)
+void bzero(void *p, size_t sz)
 {
     // assume p is word-aligned
     uint32_t *wp = p;

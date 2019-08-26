@@ -1,7 +1,9 @@
 #ifndef MEM_H
 #define MEM_H
 
-void bzero(void *p, int size);
+#include <string.h>
+
+void bzero(void *p, size_t size);
 
 volatile void *vmem_set(volatile void *s, int c, unsigned n);
 
