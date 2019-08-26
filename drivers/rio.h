@@ -23,6 +23,8 @@ struct rio_ep {
     const char *name;
     volatile uint32_t *base;
     rio_devid_t devid;
+    uint8_t *msg_rx_desc_addr;
+    unsigned rx_chain;
 };
 
 enum rio_transport_type {
@@ -37,6 +39,8 @@ enum rio_ftype {
     RIO_FTYPE_WRITE         =  5,
     RIO_FTYPE_STREAM_WRITE  =  6,
     RIO_FTYPE_MAINT         =  8,
+    RIO_FTYPE_DOORBELL      = 10,
+    RIO_FTYPE_MSG           = 11,
     RIO_FTYPE_RESP          = 13,
 };
 
@@ -69,6 +73,8 @@ struct rio_pkt {
     enum rio_ftype ftype;
     uint8_t src_tid;
     uint8_t target_tid;
+
+    /* Maintainance Class */
     enum rio_transaction transaction;
     uint16_t rdwr_bytes;
     uint64_t rdwr_mask;
@@ -77,13 +83,21 @@ struct rio_pkt {
     uint32_t config_offset;
     unsigned payload_len;
 
+    /* Messaging Layer */
+    uint8_t msg_len;
+    uint8_t seg_size;
+    uint8_t mbox;
+    uint8_t letter;
+    uint8_t msg_seg;
+
     /* could do variable len tail array ([0]) and use obj allocator */
     uint64_t payload[RIO_MAX_PAYLOAD_SIZE];
 };
 
 void rio_print_pkt(struct rio_pkt *pkt);
 
-struct rio_ep *rio_ep_create(const char *name, volatile uint32_t *base, rio_devid_t devid);
+struct rio_ep *rio_ep_create(const char *name, volatile uint32_t *base,
+			     rio_devid_t devid);
 int rio_ep_destroy(struct rio_ep *ep);
 int rio_ep_sp_send(struct rio_ep *ep, struct rio_pkt *pkt);
 int rio_ep_sp_recv(struct rio_ep *ep, struct rio_pkt *pkt);
@@ -95,5 +109,12 @@ int rio_ep_read_csr_32(struct rio_ep *ep, uint32_t *data,
                        rio_devid_t dest, uint32_t offset);
 int rio_ep_write_csr_32(struct rio_ep *ep, const uint32_t *data,
                         rio_devid_t dest, uint32_t offset);
+
+int rio_ep_msg_send(struct rio_ep *ep, rio_devid_t dest, uint64_t launch_time,
+                    uint8_t mbox, uint8_t letter, uint8_t seg_size,
+                    uint8_t *payload, unsigned len);
+int rio_ep_msg_recv(struct rio_ep *ep, uint8_t mbox, uint8_t letter,
+                    rio_devid_t *src, uint64_t *rcv_time,
+                    uint8_t *payload, unsigned len);
 
 #endif // RIO_H

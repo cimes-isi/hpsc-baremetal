@@ -8,6 +8,8 @@
 #include "rio.h"
 #include "test.h"
 
+#define MSG_SEG_SIZE 16
+
 static struct rio_pkt in_pkt, out_pkt;
 
 static int test_send_receive(struct rio_ep *ep0, struct rio_ep *ep1)
@@ -140,6 +142,56 @@ static int test_write_csr_byte(struct rio_ep *ep0, struct rio_ep *ep1)
 	return 0;
 }
 
+static int test_msg(struct rio_ep *ep0, struct rio_ep *ep1)
+{
+    int rc;
+
+	printf("RIO TEST: running message test...\r\n");
+
+    uint64_t payload = 0xdeadbeef;
+
+    rc = rio_ep_msg_send(ep0, RIO_DEVID_EP1, /* launch_time */ 0, 
+                         /* mbox */ 0, /* letter */ 0, /* seg_size */ 8,
+                        (uint8_t *)&payload, sizeof(payload));
+    if (rc)
+        return rc;
+
+#if 0
+    struct rio_pkt in_pkt;
+
+    rc = rio_ep_sp_recv(ep1, &in_pkt);
+	if (rc)
+		return rc;
+
+    printf("RIO TEST: received pkt on EP 1:\r\n");
+    rio_print_pkt(&in_pkt);
+
+    if (!(in_pkt.ftype == RIO_FTYPE_MSG)) {
+        printf("RIO TEST: ERROR: received packet is not a message packet\r\n");
+        return rc;
+    }
+#else
+    rio_devid_t src_id = 0;
+    uint64_t rcv_time = 0;
+    uint64_t rx_payload = 0;
+    rc = rio_ep_msg_recv(ep1, /* mbox */ 0, /* letter */ 0,
+                         &src_id, &rcv_time,
+                         (uint8_t *)&rx_payload, sizeof(rx_payload));
+    if (rc)
+        return rc;
+
+    printf("RIO TEST: recved msg from %u at %08x%08x payload len %u %08x%08x\r\n",
+           src_id, (uint32_t)(rcv_time >> 32), (uint32_t)(rcv_time & 0xffffffff),
+           (uint32_t)(rx_payload >> 32), (uint32_t)(rx_payload & 0xffffffff));
+
+    if (!(rx_payload != payload)) {
+        printf("RIO TEST: ERROR: received msg payload mismatches sent\r\n");
+        return rc;
+    }
+#endif
+    return 0;
+}
+
 int test_rio()
 {
     int rc = 1;
@@ -153,6 +205,7 @@ int test_rio()
 	if (!ep1)
 		goto fail_ep1;
 
+#if 0
 	rc = test_send_receive(ep0, ep1);
 	if (rc) {
 		printf("RIO TEST: FAILED: send_receive test failed\r\n");
@@ -176,6 +229,18 @@ int test_rio()
 		printf("RIO TEST: FAILED: write_csr test failed\r\n");
 		goto fail;
 	}
+#else
+    (void)test_send_receive;
+    (void)test_read_csr;
+    (void)test_write_csr;
+    (void)test_write_csr_byte;
+#endif
+
+    rc = test_msg(ep0, ep1);
+    if (rc) {
+	    printf("RIO TEST: FAILED: messsage test failed\r\n");
+	    goto fail;
+    }
 
 fail:
     rio_ep_destroy(ep1);
