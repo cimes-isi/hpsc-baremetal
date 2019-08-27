@@ -220,14 +220,14 @@ static struct rio_ep rio_eps[MAX_RIO_ENDPOINTS] = {0};
 #define NUM_MBOXES 4
 #define NUM_LETTERS 4
 
-#define NUM_RX_CHAINS 2
+#define NUM_MSG_RX_CHAINS 2
 
 #define RIO_MAX_PKT_SIZE 64 /* TODO */
 #define PKT_BUF_WORDS (RIO_MAX_PKT_SIZE / sizeof(uint32_t))
 static uint32_t pkt_buf[PKT_BUF_WORDS];
 
 static uint8_t msg_tx_desc_buf[MAX_MSG_DESC_SIZE * MAX_MSG_SEGMENTS];
-static uint8_t msg_rx_desc_buf[NUM_RX_CHAINS][MAX_MSG_DESC_SIZE * MAX_MSG_SEGMENTS];
+static uint8_t msg_rx_desc_buf[NUM_MSG_RX_CHAINS][(MAX_MSG_DESC_SIZE + MAX_MSG_SEG_SIZE) * MAX_MSG_SEGMENTS];
 
 struct rx_msg {
     uint8_t payload[MAX_MSG_SIZE];
@@ -642,6 +642,7 @@ static int unpack_msg_desc(MsgDesc *desc, uint8_t *buf_b, MsgDescType type)
             return 2;
         }
     } else {
+        desc->msg_seg = 0;
         desc->mbox |= (FIELD_EX64(buf[dw], MSG_DESC, XMBOX) << 2);
     }
     ++dw;
@@ -704,7 +705,7 @@ static unsigned init_rx_chain(uint8_t *buf_b, int size_b)
 
     bzero(buf_b, size);
 
-    while (desc + MAX_MSG_DESC_SIZE + MAX_MSG_SEG_SIZE <= buf_b + size) {
+    while (desc + MAX_MSG_DESC_SIZE + MAX_MSG_SEG_SIZE <= buf_b + size_b) {
         uint64_t *buf = (uint64_t *)desc;
         unsigned dw = 0;
 
@@ -755,6 +756,34 @@ static void enqueue_rx_chain(struct rio_ep *ep, uint8_t *head_desc)
     REGB_WRITE32(ep->base, IR_MSG_TRGT_DESCR_FIFO_L, (uint32_t)head_desc);
 }
 
+static struct rx_msg *rx_msg_peek(struct rx_msg_fifo *f)
+{
+    if (f->head == f->tail)
+        return NULL; /* empty */
+    return &f->q[f->head];
+}
+
+static struct rx_msg *rx_msg_alloc(struct rx_msg_fifo *f)
+{
+    struct rx_msg *m;
+    unsigned next_tail = (f->tail + 1) % RX_MSG_FIFO_SIZE;
+    if (next_tail == f->head)
+        return NULL; /* full */
+    m = &f->q[f->tail];
+    f->tail = next_tail;
+    init_rx_msg(m);
+    return m;
+}
+
+static int rx_msg_free(struct rx_msg_fifo *f)
+{
+    if (f->head == f->tail)
+        return -1; /* empty */
+    bzero(&f->q[f->head], sizeof(f->q[0]));
+    f->head = (f->head + 1) % RX_MSG_FIFO_SIZE;
+    return 0;
+}
+
 struct rio_ep *rio_ep_create(const char *name, volatile uint32_t *base, rio_devid_t devid)
 {
     int num_msg_rx_desc;
@@ -765,15 +794,26 @@ struct rio_ep *rio_ep_create(const char *name, volatile uint32_t *base, rio_devi
     ep->base = base;
     ep->devid = devid;
 
-    for (int i = 0; i < NUM_RX_CHAINS; ++i) {
+    for (int i = 0; i < NUM_MSG_RX_CHAINS; ++i) {
         num_msg_rx_desc =
             init_rx_chain(msg_rx_desc_buf[i], sizeof(msg_rx_desc_buf[i]));
+        ASSERT(num_msg_rx_desc > 0);
         enqueue_rx_chain(ep, &msg_rx_desc_buf[i][0]);
     }
     ep->rx_chain = 0;
     ep->msg_rx_desc_addr = &msg_rx_desc_buf[ep->rx_chain][0];
 
-    printf("RIO EP %s: created; msg rx descs %u\r\n", ep->name, num_msg_rx_desc);
+
+    /* Start a "currently received and assembled" message */
+    for (int mbox = 0; mbox < NUM_MBOXES; ++mbox) {
+        for (int letter = 0; letter < NUM_LETTERS; ++letter) {
+            struct rx_msg *msg = rx_msg_alloc(&rx_msgs[mbox][letter]);
+            ASSERT(msg); /* must have at least one spot */
+        }
+    }
+
+    printf("RIO EP %s: created; %u msg rx chains, descs %u per chain\r\n",
+           ep->name, NUM_MSG_RX_CHAINS, num_msg_rx_desc);
     return ep;
 }
 
@@ -1055,34 +1095,6 @@ int rio_ep_msg_send(struct rio_ep *ep, rio_devid_t dest, uint64_t launch_time,
     return 0;
 }
 
-static struct rx_msg *rx_msg_peek(struct rx_msg_fifo *f)
-{
-    if (f->head == f->tail)
-        return NULL; /* empty */
-    return &f->q[f->head];
-}
-
-static struct rx_msg *rx_msg_alloc(struct rx_msg_fifo *f)
-{
-    struct rx_msg *m;
-    unsigned next_tail = (f->tail + 1) % RX_MSG_FIFO_SIZE;
-    if (next_tail == f->head)
-        return NULL; /* full */
-    m = &f->q[f->tail];
-    f->tail = next_tail;
-    init_rx_msg(m);
-    return m;
-}
-
-static int rx_msg_free(struct rx_msg_fifo *f)
-{
-    if (f->head == f->tail)
-        return -1; /* empty */
-    bzero(&f->q[f->head], sizeof(f->q[0]));
-    f->head = (f->head + 1) % RX_MSG_FIFO_SIZE;
-    return 0;
-}
-
 static void receive_msg_segment(struct rio_ep *ep)
 {
     int rc;
@@ -1108,7 +1120,7 @@ static void receive_msg_segment(struct rio_ep *ep)
     struct rx_msg *msg = rx_msg_peek(&rx_msgs[desc.mbox][desc.letter]);
     ASSERT(msg); /* FIFO is can't be empty, is replenished internally */
 
-    printf("RIO EP %s: msg segments bitmask (pre): 0x%x", ep->name, msg->segments);
+    printf("RIO EP %s: msg segments bitmask (pre): 0x%x\r\n", ep->name, msg->segments);
     if (msg->segments == ~0) { /* starting fresh message (first segment) */
         msg->len = desc.msg_len * desc.seg_size;
         msg->segments = (1 << desc.msg_len) - 1;
@@ -1125,26 +1137,27 @@ static void receive_msg_segment(struct rio_ep *ep)
     vmem_cpy(msg->payload + desc.msg_seg * desc.seg_size, desc.payload_ptr, desc.seg_size);
     msg->rcv_time = desc.timestamp.rcv_time; /* keep time of latest segment */
     msg->src_id = desc.dev_id.src_id;
-    msg->segments |= (1 << desc.msg_seg);
-    printf("RIO EP %s: msg segments bitmask (post): 0x%x", ep->name, msg->segments);
+    msg->segments &= ~(1 << desc.msg_seg);
+    printf("RIO EP %s: msg segments bitmask (post): 0x%x\r\n",
+           ep->name, msg->segments);
 
     if (!desc.next_desc_addr) { /* chain still has unused buffers */
         ep->msg_rx_desc_addr = (uint8_t *)desc.next_desc_addr;
     } else { /* all buffers in the chain have been used */
 
-        printf("RIO EP %s: chain %u used up, reenqeueuing%x",
+        printf("RIO EP %s: chain %u used up, reenqeueuing%x\r\n",
                ep->name, ep->rx_chain);
 
         uint8_t *head_desc = &msg_rx_desc_buf[ep->rx_chain][0];
         reserve_rx_chain(head_desc, sizeof(msg_rx_desc_buf[0]));
         enqueue_rx_chain(ep, head_desc);
 
-        ep->rx_chain = (ep->rx_chain + 1) % NUM_RX_CHAINS;
+        ep->rx_chain = (ep->rx_chain + 1) % NUM_MSG_RX_CHAINS;
         ep->msg_rx_desc_addr = &msg_rx_desc_buf[ep->rx_chain][0];
     }
 
     if (msg->segments == 0) { /* all segments received */
-        printf("RIO EP %s: msg for mbox:letter %u:%u completed", ep->name,
+        printf("RIO EP %s: msg for mbox:letter %u:%u completed\r\n", ep->name,
                desc.mbox, desc.letter);
         msg = rx_msg_alloc(&rx_msgs[desc.mbox][desc.letter]);
         /* not easily recoverable: consumers may be peeking at the oldest
@@ -1156,7 +1169,7 @@ static void receive_msg_segment(struct rio_ep *ep)
 
 int rio_ep_msg_recv(struct rio_ep *ep, uint8_t mbox, uint8_t letter,
                     rio_devid_t *src, uint64_t *rcv_time,
-                    uint8_t *payload, unsigned len)
+                    uint8_t *payload, unsigned *len)
 {
 
     if (mbox >= NUM_MBOXES || letter >= NUM_LETTERS) {
@@ -1170,10 +1183,11 @@ int rio_ep_msg_recv(struct rio_ep *ep, uint8_t mbox, uint8_t letter,
     while (msg->segments) { /* while msg not complete */
         receive_msg_segment(ep);
     }
-    ASSERT(len >= msg->len);
-    vmem_cpy(payload, msg->payload, msg->len);
+    ASSERT(*len >= msg->len);
+    *len = msg->len;
     *src = msg->src_id;
     *rcv_time = msg->rcv_time;
+    vmem_cpy(payload, msg->payload, msg->len);
     rx_msg_free(&rx_msgs[mbox][letter]);
     return 0;
 }

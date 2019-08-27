@@ -115,6 +115,6 @@ int rio_ep_msg_send(struct rio_ep *ep, rio_devid_t dest, uint64_t launch_time,
                     uint8_t *payload, unsigned len);
 int rio_ep_msg_recv(struct rio_ep *ep, uint8_t mbox, uint8_t letter,
                     rio_devid_t *src, uint64_t *rcv_time,
-                    uint8_t *payload, unsigned len);
+                    uint8_t *payload, unsigned *size);
 
 #endif // RIO_H

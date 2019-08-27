@@ -174,19 +174,21 @@ static int test_msg(struct rio_ep *ep0, struct rio_ep *ep1)
     rio_devid_t src_id = 0;
     uint64_t rcv_time = 0;
     uint64_t rx_payload = 0;
+    unsigned payload_len = sizeof(rx_payload);
     rc = rio_ep_msg_recv(ep1, /* mbox */ 0, /* letter */ 0,
                          &src_id, &rcv_time,
-                         (uint8_t *)&rx_payload, sizeof(rx_payload));
+                         (uint8_t *)&rx_payload, &payload_len);
     if (rc)
         return rc;
 
     printf("RIO TEST: recved msg from %u at %08x%08x payload len %u %08x%08x\r\n",
            src_id, (uint32_t)(rcv_time >> 32), (uint32_t)(rcv_time & 0xffffffff),
+           payload_len,
            (uint32_t)(rx_payload >> 32), (uint32_t)(rx_payload & 0xffffffff));
 
-    if (!(rx_payload != payload)) {
+    if (rx_payload != payload) {
         printf("RIO TEST: ERROR: received msg payload mismatches sent\r\n");
-        return rc;
+        return 1;
     }
 #endif
     return 0;
