@@ -6,6 +6,9 @@
 #include "regops.h"
 
 #define RIO_MAX_PAYLOAD_SIZE 256 /* TODO: check */
+#define MAX_MSG_SEGMENTS 16 /* Spec 2.3.1 */
+#define MAX_MSG_SEG_SIZE 256 /* keep in sync with msg_seg_sizes list in rio.c */
+#define MAX_MSG_DESC_SIZE 32 /* keep in sync with msg_desc_sizes in rio.c */
 
 /* Common CSRs */
 REG32(DEV_ID,      0x000000)
@@ -19,9 +22,25 @@ REG32(B_DEV_ID,      0x000060)
 /* Max supported by Praesum BRC1 EP are 16-bit IDs */
 typedef uint16_t rio_devid_t;
 
+/* Address in memory as accessed by the Rapid IO endpoint */
+typedef uint64_t rio_ep_addr_t;
+
+#define MSG_CHAIN_BUF_SIZE ((MAX_MSG_DESC_SIZE + MAX_MSG_SEG_SIZE) * MAX_MSG_SEGMENTS)
+
 struct rio_ep {
     const char *name;
     volatile uint32_t *base;
+
+    rio_ep_addr_t buf_mem_ep;
+    uint8_t *buf_mem_cpu;
+    unsigned buf_mem_size;
+
+    uint8_t (*msg_tx_desc_buf);
+    unsigned msg_tx_desc_buf_size;
+
+    uint8_t (*msg_rx_desc_buf)[MSG_CHAIN_BUF_SIZE];
+    unsigned msg_rx_desc_buf_size;
+
     rio_devid_t devid;
     uint8_t *msg_rx_desc_addr;
     unsigned rx_chain;
@@ -97,14 +116,16 @@ struct rio_pkt {
 void rio_print_pkt(struct rio_pkt *pkt);
 
 struct rio_ep *rio_ep_create(const char *name, volatile uint32_t *base,
-			     rio_devid_t devid);
+                             rio_devid_t devid,
+                             rio_ep_addr_t buf_mem_ep, uint8_t *buf_mem_cpu,
+                             unsigned buf_mem_size);
 int rio_ep_destroy(struct rio_ep *ep);
 int rio_ep_sp_send(struct rio_ep *ep, struct rio_pkt *pkt);
 int rio_ep_sp_recv(struct rio_ep *ep, struct rio_pkt *pkt);
 int rio_ep_read_csr(struct rio_ep *ep, uint64_t *data, rio_devid_t dest,
                     uint32_t offset, uint16_t len, uint64_t mask);
 int rio_ep_write_csr(struct rio_ep *ep, const uint64_t *data,rio_devid_t dest,
-                    uint32_t offset, uint16_t len, uint64_t mask);
+                     uint32_t offset, uint16_t len, uint64_t mask);
 int rio_ep_read_csr_32(struct rio_ep *ep, uint32_t *data,
                        rio_devid_t dest, uint32_t offset);
 int rio_ep_write_csr_32(struct rio_ep *ep, const uint32_t *data,

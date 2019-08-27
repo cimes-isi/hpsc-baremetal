@@ -4,6 +4,7 @@
 #include "panic.h"
 #include "mem.h"
 #include "hwinfo.h"
+#include "mem-map.h"
 #include "nvic.h"
 #include "rio.h"
 #include "test.h"
@@ -200,12 +201,24 @@ int test_rio()
 
     nvic_int_enable(TRCH_IRQ__RIO_1);
 
-    struct rio_ep *ep0 = rio_ep_create("RIO_EP0", RIO_EP0_BASE, RIO_DEVID_EP0);
+    /* Partition buffer memory evenly among the endpoints */
+    const unsigned buf_mem_size = RIO_MEM_SIZE / 2;
+    uint8_t *buf_mem_cpu = (uint8_t *)RIO_MEM_WIN_ADDR;
+    rio_ep_addr_t buf_mem_ep = RIO_MEM_ADDR;
+
+    struct rio_ep *ep0 = rio_ep_create("RIO_EP0", RIO_EP0_BASE, RIO_DEVID_EP0,
+                                       buf_mem_ep, buf_mem_cpu, buf_mem_size);
 	if (!ep0)
 		goto fail_ep0;
-    struct rio_ep *ep1 = rio_ep_create("RIO_EP1", RIO_EP1_BASE, RIO_DEVID_EP1);
+    buf_mem_ep += buf_mem_size;
+    buf_mem_cpu += buf_mem_size;
+
+    struct rio_ep *ep1 = rio_ep_create("RIO_EP1", RIO_EP1_BASE, RIO_DEVID_EP1,
+                                       buf_mem_ep, buf_mem_cpu, buf_mem_size);
 	if (!ep1)
 		goto fail_ep1;
+    buf_mem_ep += buf_mem_size;
+    buf_mem_cpu += buf_mem_size;
 
 #if 0
 	rc = test_send_receive(ep0, ep1);

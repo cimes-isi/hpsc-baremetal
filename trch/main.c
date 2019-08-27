@@ -131,11 +131,6 @@ int main ( void )
         panic("shmem test");
 #endif // TEST_SHMEM
 
-#if TEST_RIO
-    if (test_rio())
-        panic("rio test");
-#endif // TEST_RIO
-
 #if CONFIG_TRCH_DMA
     struct dma *trch_dma = trch_dma_init();
     if (!trch_dma)
@@ -157,6 +152,11 @@ int main ( void )
     if (test_rt_mmu())
         panic("RTPS/TRCH-HPPS MMU test");
 #endif // TEST_RT_MMU
+
+#if TEST_RIO /* must be after RT MMU setup */
+    if (test_rio())
+        panic("rio test");
+#endif // TEST_RIO
 
 #if CONFIG_MBOX_DEV_HPPS
     struct mbox_link_dev mldev_hpps;

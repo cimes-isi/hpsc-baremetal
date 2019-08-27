@@ -92,23 +92,7 @@ FIELD(RIO_PKT_WORD1, DATA_3LSB, 8, 24)
 FIELD(RIO_PKT_WORD2, DATA_4MID, 0, 32)
 FIELD(RIO_PKT_WORD3, DATA_1MSB, 0,  8)
 
-/* See Chapter 7.2 in User Guide, but flip the byte order,
-   since we will read each 8 bytes as a 64-bit double-word and access the
-   fields in that double-word. First byte in memory (numbered 0 in
-   the user guide) becomes MSB in the double-word. */
-#if 0
-FIELD(MSG_DESC, PRIO,           60,  4)
-FIELD(MSG_DESC, INTERRUPT,      59,  1)
-FIELD(MSG_DESC, FREE,           58,  1)
-FIELD(MSG_DESC, TTYPE,          56,  2)
-FIELD(MSG_DESC, DEST_ID,        24, 32)
-FIELD(MSG_DESC, MSG_LEN,        20,  4)
-FIELD(MSG_DESC, SEG_SIZE,       16,  4)
-FIELD(MSG_DESC, LETTER,         14,  2)
-FIELD(MSG_DESC, MBOX,           12,  2)
-FIELD(MSG_DESC, MSG_SEG,         8,  4)
-FIELD(MSG_DESC, XMBOX,           8,  4) /* overlaps across desc types */
-#else
+/* See Chapter 7.2 in User Guide */
 FIELD(MSG_DESC, PRIO,            0,  4)
 FIELD(MSG_DESC, INTERRUPT,       4,  1)
 FIELD(MSG_DESC, FREE,            5,  1)
@@ -121,7 +105,6 @@ FIELD(MSG_DESC, LETTER,         48,  2)
 FIELD(MSG_DESC, MBOX,           50,  2)
 FIELD(MSG_DESC, MSG_SEG,        52,  4)
 FIELD(MSG_DESC, XMBOX,          52,  4) /* overlaps across desc types */
-#endif
 
 typedef enum MsgDescType {
     MSG_DESC_INITIATOR_PS,
@@ -152,7 +135,6 @@ typedef struct MsgDesc {
     } timestamp;
 } MsgDesc;
 
-#if 1
 /* Figure 10 in 7.2.1 in User Guide (in bytes) */
 static const uint8_t msg_desc_sizes[] = {
     [MSG_DESC_INITIATOR_PS] = 3 * 8,
@@ -160,16 +142,12 @@ static const uint8_t msg_desc_sizes[] = {
     [MSG_DESC_TARGET]       = 4 * 8,
 };
 #define MSG_DESC_SIZES_ENTRIES (sizeof(msg_desc_sizes) / sizeof(msg_desc_sizes[0]))
-#define MAX_MSG_DESC_SIZE 32 /* keep in sync with the list above */
 
 static uint8_t msg_desc_size(MsgDescType type)
 {
     ASSERT(type < MSG_DESC_SIZES_ENTRIES);
     return msg_desc_sizes[type];
 }
-#else
-#define MAX_MSG_DESC_SIZE 32 /* keep in sync with the list above */
-#endif
 
 /* Table 4-4 (ssize field) in Spec (in bytes) */
 /* TODO: move to device independent code? */
@@ -184,7 +162,6 @@ static const uint16_t msg_seg_sizes[] = {
     [MSG_SEG_SIZE(0b1110)]  = 256,
 };
 #define MSG_SEG_SIZES_ENTRIES (sizeof(msg_seg_sizes) / sizeof(msg_seg_sizes[0]))
-#define MAX_MSG_SEG_SIZE 256 /* keep in sync with the list above */
 
 #define MSG_SEG_SIZE_INVALID 0
 #define MSG_SEG_SIZE_FIELD_INVALID 0xff
@@ -213,8 +190,6 @@ enum access_type {
 
 static struct rio_ep rio_eps[MAX_RIO_ENDPOINTS] = {0};
 
-#define MAX_MSG_SEGMENTS 16 /* Spec 2.3.1 */
-
 #define MAX_MSG_SIZE 256 /* TODO */
 
 #define NUM_MBOXES 4
@@ -226,8 +201,7 @@ static struct rio_ep rio_eps[MAX_RIO_ENDPOINTS] = {0};
 #define PKT_BUF_WORDS (RIO_MAX_PKT_SIZE / sizeof(uint32_t))
 static uint32_t pkt_buf[PKT_BUF_WORDS];
 
-static uint8_t msg_tx_desc_buf[MAX_MSG_DESC_SIZE * MAX_MSG_SEGMENTS];
-static uint8_t msg_rx_desc_buf[NUM_MSG_RX_CHAINS][(MAX_MSG_DESC_SIZE + MAX_MSG_SEG_SIZE) * MAX_MSG_SEGMENTS];
+/* TODO: move all state into struct ep */
 
 struct rx_msg {
     uint8_t payload[MAX_MSG_SIZE];
@@ -328,6 +302,27 @@ static bool check_rdwr_size(uint16_t bytes, uint64_t mask)
         return false;
     }
     return true;
+}
+
+/* To support buffers in hi memory, CPU accesses via a window in 32-bit
+   address space (window is provided to the driver by the consumer). */
+static inline rio_ep_addr_t cpu_to_ep_addr(struct rio_ep *ep, uint8_t *cpu_addr)
+{
+    if (!cpu_addr)
+        return 0;
+    ASSERT(ep->buf_mem_cpu <= cpu_addr && cpu_addr < ep->buf_mem_cpu + ep->buf_mem_size);
+    rio_ep_addr_t ep_addr = ep->buf_mem_ep + (cpu_addr - ep->buf_mem_cpu);
+    ASSERT(ep->buf_mem_ep <= ep_addr && ep_addr < ep->buf_mem_ep + ep->buf_mem_size);
+    return ep_addr;
+}
+static inline uint8_t *ep_to_cpu_addr(struct rio_ep *ep, rio_ep_addr_t ep_addr)
+{
+    if (ep_addr == 0)
+        return NULL;
+    ASSERT(ep->buf_mem_ep <= ep_addr && ep_addr < ep->buf_mem_ep + ep->buf_mem_size);
+    uint8_t *cpu_addr = ep->buf_mem_cpu + (ep_addr - ep->buf_mem_ep);
+    ASSERT(ep->buf_mem_cpu <= cpu_addr && cpu_addr < ep->buf_mem_cpu + ep->buf_mem_size);
+    return cpu_addr;
 }
 
 static unsigned pack_pkt(uint32_t *buf, unsigned buf_size, struct rio_pkt *pkt)
@@ -565,7 +560,8 @@ void rio_print_pkt(struct rio_pkt *pkt)
     }
 }
 
-static int pack_msg_desc(uint8_t *buf_b, unsigned size, MsgDesc *desc)
+static int pack_msg_desc(struct rio_ep *ep, uint8_t *buf_b, unsigned size,
+                         MsgDesc *desc)
 {
     uint64_t *buf = (uint64_t *)buf_b;
     unsigned dw = 0;
@@ -593,9 +589,11 @@ static int pack_msg_desc(uint8_t *buf_b, unsigned size, MsgDesc *desc)
     }
     ++dw;
     ASSERT(dw < size);
-    buf[dw++] = (uint32_t)desc->payload_ptr;
+    printf("1\r\n");
+    buf[dw++] = cpu_to_ep_addr(ep, desc->payload_ptr);
     ASSERT(dw < size);
-    buf[dw++] = (uint32_t)desc->next_desc_addr;
+    printf("2\r\n");
+    buf[dw++] = cpu_to_ep_addr(ep, desc->next_desc_addr);
     if (desc->type == MSG_DESC_INITIATOR_DS) {
         ASSERT(dw < size);
         buf[dw++] = desc->timestamp.launch_time;
@@ -603,7 +601,8 @@ static int pack_msg_desc(uint8_t *buf_b, unsigned size, MsgDesc *desc)
     return dw * 8;
 }
 
-static int unpack_msg_desc(MsgDesc *desc, uint8_t *buf_b, MsgDescType type)
+static int unpack_msg_desc(struct rio_ep *ep, MsgDesc *desc,
+                           uint8_t *buf_b, MsgDescType type)
 {
     int dw = 0;
     unsigned len = msg_desc_size(type);
@@ -647,14 +646,22 @@ static int unpack_msg_desc(MsgDesc *desc, uint8_t *buf_b, MsgDescType type)
     }
     ++dw;
     ASSERT(dw < len);
-    desc->payload_ptr = (uint8_t *)(uint32_t)buf[dw];
+    desc->payload_ptr = ep_to_cpu_addr(ep, buf[dw]);
     ++dw;
     ASSERT(dw < len);
-    desc->next_desc_addr = (uint8_t *)(uint32_t)buf[dw];
+    desc->next_desc_addr = ep_to_cpu_addr(ep, buf[dw]);
     ++dw;
-    if (type == MSG_DESC_INITIATOR_DS) {
-        ASSERT(dw < len);
-        desc->timestamp.launch_time = buf[dw];
+    ASSERT(dw < len);
+    switch (type) {
+        case MSG_DESC_INITIATOR_DS:
+            desc->timestamp.launch_time = buf[dw];
+            break;
+        case MSG_DESC_TARGET:
+            desc->timestamp.rcv_time = buf[dw];
+            break;
+        default:
+            /* no timestamp for other types */
+            break;
     }
     return 0;
 }
@@ -697,7 +704,7 @@ static inline void init_rx_msg(struct rx_msg *msg)
     bzero(msg->payload, sizeof(msg->payload));
 }
 
-static unsigned init_rx_chain(uint8_t *buf_b, int size_b)
+static unsigned init_rx_chain(struct rio_ep *ep, uint8_t *buf_b, int size_b)
 {
     int size = size_b / sizeof(uint64_t);
     uint8_t *desc = buf_b;
@@ -713,13 +720,37 @@ static unsigned init_rx_chain(uint8_t *buf_b, int size_b)
         buf[dw] = FIELD_DP64(buf[dw], MSG_DESC, INTERRUPT, 0);
         buf[dw] = FIELD_DP64(buf[dw], MSG_DESC, FREE, 0);
         ++dw;
+
+        uint8_t *payload_addr_cpu = desc + MAX_MSG_DESC_SIZE;
+        ASSERT(ep->buf_mem_cpu <= payload_addr_cpu &&
+               payload_addr_cpu < ep->buf_mem_cpu + ep->buf_mem_size - MAX_MSG_SEG_SIZE);
+
+        printf("3 %p\r\n", payload_addr_cpu);
+        rio_ep_addr_t payload_addr_ep = cpu_to_ep_addr(ep, payload_addr_cpu);
+        printf("3 %08x%08x\r\n", (uint32_t)(payload_addr_ep >> 32), (uint32_t)payload_addr_ep);
+        ASSERT(ep->buf_mem_ep <= payload_addr_ep &&
+               payload_addr_ep < ep->buf_mem_ep + ep->buf_mem_size - MAX_MSG_SEG_SIZE);
+
         ASSERT(dw < size);
-        buf[dw++] = (uint32_t)(desc + MAX_MSG_DESC_SIZE);
-        ASSERT(dw < size);
+        buf[dw++] = payload_addr_ep;
+
         desc += MAX_MSG_DESC_SIZE + MAX_MSG_SEG_SIZE;
-        buf[dw++] = (uint32_t)desc;
+
+        uint8_t *next_desc_addr_cpu = desc;
+        ASSERT(ep->buf_mem_cpu <= next_desc_addr_cpu &&
+               next_desc_addr_cpu < ep->buf_mem_cpu + ep->buf_mem_size - MAX_MSG_DESC_SIZE);
+
+        printf("4\r\n");
+        rio_ep_addr_t next_desc_addr_ep = cpu_to_ep_addr(ep, next_desc_addr_cpu);
+        ASSERT(ep->buf_mem_ep <= next_desc_addr_ep &&
+               next_desc_addr_ep < ep->buf_mem_ep + ep->buf_mem_size - MAX_MSG_DESC_SIZE);
+
         ASSERT(dw < size);
-        buf[dw++] = 0;
+        buf[dw++] = next_desc_addr_ep;
+
+        ASSERT(dw < size);
+        buf[dw++] = 0; /* timestamp */
+
         ++num_desc;
     }
     return num_desc;
@@ -752,8 +783,17 @@ static unsigned reserve_rx_chain(uint8_t *desc, int buf_size)
 
 static void enqueue_rx_chain(struct rio_ep *ep, uint8_t *head_desc)
 {
-    REGB_WRITE32(ep->base, IR_MSG_TRGT_DESCR_FIFO_H, 0);
-    REGB_WRITE32(ep->base, IR_MSG_TRGT_DESCR_FIFO_L, (uint32_t)head_desc);
+    rio_ep_addr_t head_desc_ep = cpu_to_ep_addr(ep, head_desc);
+
+    ASSERT(ep->buf_mem_cpu <= head_desc &&
+           head_desc < ep->buf_mem_cpu + ep->buf_mem_size - MAX_MSG_DESC_SIZE);
+    ASSERT(ep->buf_mem_ep <= head_desc_ep &&
+           head_desc_ep < ep->buf_mem_ep + ep->buf_mem_size - MAX_MSG_DESC_SIZE);
+
+    REGB_WRITE32(ep->base, IR_MSG_TRGT_DESCR_FIFO_H,
+                 (uint32_t)((uint64_t)head_desc_ep >> 32));
+    REGB_WRITE32(ep->base, IR_MSG_TRGT_DESCR_FIFO_L,
+                 (uint32_t)((uint64_t)head_desc_ep & 0xffffffff));
 }
 
 static struct rx_msg *rx_msg_peek(struct rx_msg_fifo *f)
@@ -784,9 +824,14 @@ static int rx_msg_free(struct rx_msg_fifo *f)
     return 0;
 }
 
-struct rio_ep *rio_ep_create(const char *name, volatile uint32_t *base, rio_devid_t devid)
+struct rio_ep *rio_ep_create(const char *name, volatile uint32_t *base,
+                             rio_devid_t devid,
+                             rio_ep_addr_t buf_mem_ep, uint8_t *buf_mem_cpu,
+                             unsigned buf_mem_size)
 {
+    unsigned buf_len = 0;
     int num_msg_rx_desc;
+
     struct rio_ep *ep = OBJECT_ALLOC(rio_eps);
     if (!ep)
         return NULL;
@@ -794,15 +839,34 @@ struct rio_ep *rio_ep_create(const char *name, volatile uint32_t *base, rio_devi
     ep->base = base;
     ep->devid = devid;
 
+    /* Used later for translating addresses between CPU and EP */
+    ep->buf_mem_ep = buf_mem_ep;
+    ep->buf_mem_cpu = buf_mem_cpu;
+    ep->buf_mem_size = buf_mem_size;
+
+    /* "Allocate" buffers (create pointers accessible by CPU) */
+    /* TODO: align each buffer */
+
+    ep->msg_tx_desc_buf = ep->buf_mem_cpu + buf_len;
+    ep->msg_tx_desc_buf_size = MSG_CHAIN_BUF_SIZE;
+    buf_len += ep->msg_tx_desc_buf_size;
+    if (buf_mem_size < buf_len)
+        goto fail_mem;
+
+    ep->msg_rx_desc_buf = (uint8_t (*)[MSG_CHAIN_BUF_SIZE])(ep->buf_mem_cpu + buf_len);
+    ep->msg_rx_desc_buf_size = NUM_MSG_RX_CHAINS * MSG_CHAIN_BUF_SIZE;
+    buf_len += ep->msg_rx_desc_buf_size;
+    if (buf_mem_size < buf_len)
+        goto fail_mem;
+
     for (int i = 0; i < NUM_MSG_RX_CHAINS; ++i) {
         num_msg_rx_desc =
-            init_rx_chain(msg_rx_desc_buf[i], sizeof(msg_rx_desc_buf[i]));
+            init_rx_chain(ep, ep->msg_rx_desc_buf[i], sizeof(ep->msg_rx_desc_buf[i]));
         ASSERT(num_msg_rx_desc > 0);
-        enqueue_rx_chain(ep, &msg_rx_desc_buf[i][0]);
+        enqueue_rx_chain(ep, &ep->msg_rx_desc_buf[i][0]);
     }
     ep->rx_chain = 0;
-    ep->msg_rx_desc_addr = &msg_rx_desc_buf[ep->rx_chain][0];
-
+    ep->msg_rx_desc_addr = &ep->msg_rx_desc_buf[ep->rx_chain][0];
 
     /* Start a "currently received and assembled" message */
     for (int mbox = 0; mbox < NUM_MBOXES; ++mbox) {
@@ -815,6 +879,12 @@ struct rio_ep *rio_ep_create(const char *name, volatile uint32_t *base, rio_devi
     printf("RIO EP %s: created; %u msg rx chains, descs %u per chain\r\n",
            ep->name, NUM_MSG_RX_CHAINS, num_msg_rx_desc);
     return ep;
+
+fail_mem:
+    printf("RIO EP %s: ERROR: insufficient buffer memory: %u < %u\r\n",
+           ep->name, buf_mem_size, buf_len);
+    OBJECT_FREE(ep);
+    return NULL;
 }
 
 int rio_ep_destroy(struct rio_ep *ep)
@@ -1033,10 +1103,13 @@ int rio_ep_msg_send(struct rio_ep *ep, rio_devid_t dest, uint64_t launch_time,
     MsgDescType desc_type = launch_time > 0 ?
         MSG_DESC_INITIATOR_DS : MSG_DESC_INITIATOR_PS;
 
-    uint32_t desc_chain_addr = (uint32_t)&msg_tx_desc_buf[0];
-    uint8_t *desc_addr;
+    uint8_t *desc_addr = &ep->msg_tx_desc_buf[0];
+    uint8_t *payload_addr = desc_addr + MAX_MSG_DESC_SIZE;
+    uint8_t *payload_ptr = payload;
 
     for (int seg = 0; seg < msg_len; ++seg) {
+
+        uint8_t *next_desc_addr = desc_addr + MAX_MSG_DESC_SIZE + MAX_MSG_SEG_SIZE;
 
         MsgDesc desc = { /* fields validated later in pack() */
             .type = desc_type,
@@ -1057,27 +1130,37 @@ int rio_ep_msg_send(struct rio_ep *ep, rio_devid_t dest, uint64_t launch_time,
             /* TODO: save across segments? */
             .timestamp.launch_time = launch_time,
 
-            /* this func is synchronous */
-            .payload_ptr = payload + seg * seg_size,
-            .next_desc_addr = (seg == msg_len - 1) ? 0 : &msg_tx_desc_buf[seg + 1],
+            .payload_ptr = payload_addr,
+            .next_desc_addr = (seg == msg_len - 1) ? 0 : next_desc_addr,
         };
 
-        desc_addr = &msg_tx_desc_buf[seg * MAX_MSG_DESC_SIZE];
+        vmem_cpy(payload_addr, payload_ptr, seg_size);
+        payload_ptr += seg_size;
+
         printf("RIO EP %s: created msg descriptor %u/%u at %p:\r\n",
                ep->name, seg + 1, msg_len, desc_addr);
         print_msg_desc(&desc);
 
-        pack_msg_desc(desc_addr, MAX_MSG_DESC_SIZE, &desc);
+        pack_msg_desc(ep, desc_addr, MAX_MSG_DESC_SIZE, &desc);
+
+        if (seg < msg_len - 1) /* don't overwrite on last iteration */
+            desc_addr = next_desc_addr;
     }
+
+    rio_ep_addr_t desc_chain_addr_ep = cpu_to_ep_addr(ep, &ep->msg_tx_desc_buf[0]);
 
     switch (desc_type) {
         case MSG_DESC_INITIATOR_PS:
-            REGB_WRITE32(ep->base, IR_MSG_INIT_PS_DESCR_FIFO_H, 0);
-            REGB_WRITE32(ep->base, IR_MSG_INIT_PS_DESCR_FIFO_L, desc_chain_addr);
+            REGB_WRITE32(ep->base, IR_MSG_INIT_PS_DESCR_FIFO_H,
+                         (uint32_t)((uint64_t)desc_chain_addr_ep >> 32));
+            REGB_WRITE32(ep->base, IR_MSG_INIT_PS_DESCR_FIFO_L,
+                         (uint32_t)((uint64_t)desc_chain_addr_ep & 0xffffffff));
             break;
         case MSG_DESC_INITIATOR_DS:
-            REGB_WRITE32(ep->base, IR_MSG_INIT_DS_DESCR_FIFO_H, 0);
-            REGB_WRITE32(ep->base, IR_MSG_INIT_DS_DESCR_FIFO_L, desc_chain_addr);
+            REGB_WRITE32(ep->base, IR_MSG_INIT_DS_DESCR_FIFO_H,
+                         (uint32_t)((uint64_t)desc_chain_addr_ep >> 32));
+            REGB_WRITE32(ep->base, IR_MSG_INIT_DS_DESCR_FIFO_L,
+                         (uint32_t)((uint64_t)desc_chain_addr_ep & 0xffffffff));
             break;
         default:
             ASSERT(!"unexpected msg descriptor type");
@@ -1109,7 +1192,7 @@ static void receive_msg_segment(struct rio_ep *ep)
         uint64_t header = *((uint64_t *)ep->msg_rx_desc_addr);
         free = FIELD_EX64(header, MSG_DESC, FREE);
     } while (!free);
-    rc = unpack_msg_desc(&desc, ep->msg_rx_desc_addr, MSG_DESC_TARGET);
+    rc = unpack_msg_desc(ep, &desc, ep->msg_rx_desc_addr, MSG_DESC_TARGET);
     ASSERT(!rc && "invalid RIO msg descriptor"); /* not easily recoverable */
 
     printf("RIO EP %s: got segment:", ep->name);
@@ -1145,15 +1228,15 @@ static void receive_msg_segment(struct rio_ep *ep)
         ep->msg_rx_desc_addr = (uint8_t *)desc.next_desc_addr;
     } else { /* all buffers in the chain have been used */
 
-        printf("RIO EP %s: chain %u used up, reenqeueuing%x\r\n",
+        printf("RIO EP %s: chain %u used up, reenqeueuing\r\n",
                ep->name, ep->rx_chain);
 
-        uint8_t *head_desc = &msg_rx_desc_buf[ep->rx_chain][0];
-        reserve_rx_chain(head_desc, sizeof(msg_rx_desc_buf[0]));
+        uint8_t *head_desc = &ep->msg_rx_desc_buf[ep->rx_chain][0];
+        reserve_rx_chain(head_desc, sizeof(ep->msg_rx_desc_buf[0]));
         enqueue_rx_chain(ep, head_desc);
 
         ep->rx_chain = (ep->rx_chain + 1) % NUM_MSG_RX_CHAINS;
-        ep->msg_rx_desc_addr = &msg_rx_desc_buf[ep->rx_chain][0];
+        ep->msg_rx_desc_addr = &ep->msg_rx_desc_buf[ep->rx_chain][0];
     }
 
     if (msg->segments == 0) { /* all segments received */
