@@ -6,6 +6,8 @@
 #include "hwinfo.h"
 #include "mem-map.h"
 #include "nvic.h"
+#include "dma.h"
+#include "bit.h"
 #include "rio.h"
 #include "test.h"
 
@@ -195,7 +197,71 @@ static int test_msg(struct rio_ep *ep0, struct rio_ep *ep1)
     return 0;
 }
 
-int test_rio()
+#if 0
+static uint8_t test_buf1[1024] __aligned__((256));
+static uint8_t test_buf2[1024] __aligned__((256));
+#else
+static uint8_t *test_buf1 = (uint8_t *)(RIO_MEM_TEST_WIN_ADDR +    0x0);
+static uint8_t *test_buf2 = (uint8_t *)(RIO_MEM_TEST_WIN_ADDR + 0x1000);
+static unsigned test_buf_size = RIO_MEM_TEST_SIZE / 2;
+#endif
+
+static int test_map(struct rio_ep *ep0, struct rio_ep *ep1, struct dma *dmac)
+{
+    int rc;
+
+	printf("RIO TEST: running map test...\r\n");
+
+    /* TODO: setup map */
+#if 0
+    if (rc)
+        return rc;
+#else
+    (void)rc;
+#endif
+
+#define MAP_REGION_OFFSET    0x00440000 /*  in Implementation Registers section (? TODO) */
+    memset(test_buf1, 0x42, test_buf_size);
+
+    uint8_t *map_reg = (uint8_t *)((uint8_t *)RIO_EP0_BASE + MAP_REGION_OFFSET);
+
+#if 0
+    vmem_cpy(map_reg, test_buf1, sizeof(test_buf1));
+    vmem_cpy(test_buf2, map_reg, sizeof(test_buf2));
+#else
+    /* TODO: use HPPS SRIO DMA */
+    unsigned tx_size = ALIGN(test_buf_size, DMA_MAX_BURST_BITS);
+    struct dma_tx *dtx = dma_transfer(dmac, /* chan */ 0, // TODO: allocate channel per user
+        (uint32_t *)test_buf1, (uint32_t *)map_reg, tx_size,
+        NULL, NULL /* no callback */);
+    rc = dma_wait(dtx);
+    if (rc) {
+        printf("TEST RIO map: DMA transfer to map reg failed: rc %u\r\n", rc);
+        return rc;
+    }
+    dtx = dma_transfer(dmac, /* chan */ 0, // TODO: allocate channel per user
+        (uint32_t *)map_reg, (uint32_t *)test_buf2, tx_size,
+        NULL, NULL /* no callback */);
+    rc = dma_wait(dtx);
+    if (rc) {
+        printf("TEST RIO map: DMA transfer from map reg failed: rc %u\r\n", rc);
+        return rc;
+    }
+#endif
+
+    for (int i = 0; i < sizeof(test_buf1); ++i) {
+        if (test_buf1[i] != test_buf2[i]) {
+            printf("RIO TEST map: FAILED: mismatch in data written to map region\r\n");
+            return 1;
+        }
+    }
+
+    printf("RIO TEST map: PASS\r\n");
+
+    return 0;
+}
+
+int test_rio(struct dma *dmac)
 {
     int rc = 1;
 
@@ -244,16 +310,23 @@ int test_rio()
 		printf("RIO TEST: FAILED: write_csr test failed\r\n");
 		goto fail;
 	}
+
+    rc = test_msg(ep0, ep1);
+    if (rc) {
+	    printf("RIO TEST: FAILED: messsage test failed\r\n");
+	    goto fail;
+    }
 #else
     (void)test_send_receive;
     (void)test_read_csr;
     (void)test_write_csr;
     (void)test_write_csr_byte;
+    (void)test_msg;
 #endif
 
-    rc = test_msg(ep0, ep1);
+    rc = test_map(ep0, ep1, dmac);
     if (rc) {
-	    printf("RIO TEST: FAILED: messsage test failed\r\n");
+	    printf("RIO TEST: FAILED: map test failed\r\n");
 	    goto fail;
     }
 

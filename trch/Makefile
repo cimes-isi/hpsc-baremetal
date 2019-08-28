@@ -56,7 +56,10 @@ ifeq ($(strip $(TEST_RIO)),1)
 ifneq ($(strip $(CONFIG_RT_MMU)),1)
 $(error TEST_RIO requires CONFIG_RT_MMU)
 endif
+ifneq ($(strip $(CONFIG_TRCH_DMA)),1)
+$(error TEST_RIO requires CONFIG_TRCH_DMA)
 endif
+endif # TEST_RIO
 ifeq ($(strip $(TEST_WDTS)),1)
 ifneq ($(call cfg-or,$(CONFIG_TRCH_WDT) $(CONFIG_RTPS_R52_WDT) $(CONFIG_HPPS_WDT)),1)
 $(error TEST_WDTS requires one of CONFIG_*_WDT)
